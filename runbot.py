@@ -49,6 +49,12 @@ def parse_arguments():
                         'Sell: pause if price <= pause-price. (default: -1, no pause)')
     parser.add_argument('--boost', action='store_true',
                         help='Use the Boost mode for volume boosting')
+    parser.add_argument(
+        "--stop-loss-pct",
+        type=float,
+        default=0,
+        help="按百分比止损（例如 5 表示亏损 5% 时市价平仓；0 表示关闭百分比止损）"
+    )
 
     return parser.parse_args()
 
@@ -116,7 +122,8 @@ async def main():
         grid_step=Decimal(args.grid_step),
         stop_price=Decimal(args.stop_price),
         pause_price=Decimal(args.pause_price),
-        boost_mode=args.boost
+        boost_mode=args.boost,
+        stop_loss_pct=Decimal(str(args.stop_loss_pct))
     )
 
     # Create and run the bot
