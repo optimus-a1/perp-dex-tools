@@ -224,6 +224,62 @@ class TradingBot:
             self.logger.log(f"Traceback: {traceback.format_exc()}", "ERROR")
             return False
 
+    async def _execute_stop_loss(self):
+        """Cancel active orders and close positions when stop is triggered."""
+        try:
+            self.logger.log("Stop loss triggered - cancelling active orders", "WARNING")
+            active_orders = await self.exchange_client.get_active_orders(self.config.contract_id)
+
+            for order in active_orders:
+                try:
+                    cancel_result = await self.exchange_client.cancel_order(order.order_id)
+                    if not cancel_result.success:
+                        self.logger.log(
+                            f"Failed to cancel order {order.order_id}: {cancel_result.error_message}",
+                            "WARNING"
+                        )
+                except Exception as cancel_error:
+                    self.logger.log(f"Error cancelling order {order.order_id}: {cancel_error}", "ERROR")
+
+            position_size = await self.exchange_client.get_account_positions()
+            if position_size > 0:
+                close_side = self.config.close_order_side
+                self.logger.log(
+                    f"Executing stop loss close for {position_size} contracts on side {close_side}",
+                    "WARNING"
+                )
+
+                place_market_order = getattr(self.exchange_client, "place_market_order", None)
+                if callable(place_market_order):
+                    close_result = await place_market_order(
+                        self.config.contract_id,
+                        position_size,
+                        close_side
+                    )
+                else:
+                    best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
+                    close_price = best_bid if close_side == "sell" else best_ask
+                    close_result = await self.exchange_client.place_close_order(
+                        self.config.contract_id,
+                        position_size,
+                        close_price,
+                        close_side
+                    )
+
+                if not close_result.success:
+                    self.logger.log(
+                        f"Stop loss close failed: {close_result.error_message}",
+                        "ERROR"
+                    )
+                else:
+                    self.logger.log("Stop loss close order placed successfully", "INFO")
+            else:
+                self.logger.log("No open position to close during stop loss", "INFO")
+
+        except Exception as e:
+            self.logger.log(f"Error executing stop loss: {e}", "ERROR")
+            self.logger.log(f"Traceback: {traceback.format_exc()}", "ERROR")
+
     async def _handle_order_result(self, order_result) -> bool:
         """Handle the result of an order placement."""
         order_id = order_result.order_id
@@ -537,6 +593,7 @@ class TradingBot:
 
                 stop_trading, pause_trading = await self._check_price_condition()
                 if stop_trading:
+                    await self._execute_stop_loss()
                     msg = f"\n\nWARNING: [{self.config.exchange.upper()}_{self.config.ticker.upper()}] \n"
                     msg += "Stopped trading due to stop price triggered\n"
                     msg += "价格已经达到停止交易价格，脚本将停止交易\n"
