@@ -32,6 +32,7 @@ class TradingConfig:
     stop_price: Decimal
     pause_price: Decimal
     boost_mode: bool
+    stop_loss_pct: Decimal
 
     @property
     def close_order_side(self) -> str:
@@ -81,6 +82,7 @@ class TradingBot:
         self.order_canceled_event = asyncio.Event()
         self.shutdown_requested = False
         self.loop = None
+        self.entry_price: Optional[Decimal] = None
 
         # Register order callback
         self._setup_websocket_handlers()
@@ -284,6 +286,9 @@ class TradingBot:
         """Handle the result of an order placement."""
         order_id = order_result.order_id
         filled_price = order_result.price
+
+        if filled_price is not None:
+            self.entry_price = filled_price
 
         if self.order_filled_event.is_set() or order_result.status == 'FILLED':
             if self.config.boost_mode:
@@ -532,6 +537,26 @@ class TradingBot:
 
         return stop_trading, pause_trading
 
+    async def _check_loss_condition(self) -> bool:
+        """Check if the current position has reached the stop loss percentage."""
+        if not self.entry_price or self.config.stop_loss_pct <= 0:
+            return False
+
+        best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
+        if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
+            raise ValueError("No bid/ask data available")
+
+        if self.config.direction == "buy":
+            current_price = best_bid
+            loss_pct = (self.entry_price - current_price) / self.entry_price * 100
+        elif self.config.direction == "sell":
+            current_price = best_ask
+            loss_pct = (current_price - self.entry_price) / self.entry_price * 100
+        else:
+            raise ValueError(f"Invalid direction: {self.config.direction}")
+
+        return loss_pct >= self.config.stop_loss_pct
+
     async def send_notification(self, message: str):
         lark_token = os.getenv("LARK_TOKEN")
         if lark_token:
@@ -563,6 +588,7 @@ class TradingBot:
             self.logger.log(f"Stop Price: {self.config.stop_price}", "INFO")
             self.logger.log(f"Pause Price: {self.config.pause_price}", "INFO")
             self.logger.log(f"Boost Mode: {self.config.boost_mode}", "INFO")
+            self.logger.log(f"Stop Loss Pct: {self.config.stop_loss_pct}%", "INFO")
             self.logger.log("=============================", "INFO")
 
             # Capture the running event loop for thread-safe callbacks
@@ -603,6 +629,15 @@ class TradingBot:
 
                 if pause_trading:
                     await asyncio.sleep(5)
+                    continue
+
+                if await self._check_loss_condition():
+                    await self._execute_stop_loss()
+                    msg = f"\n\nWARNING: [{self.config.exchange.upper()}_{self.config.ticker.upper()}] \n"
+                    msg += f"Stopped trading due to {self.config.stop_loss_pct}% loss\n"
+                    msg += f"亏损已达到 {self.config.stop_loss_pct}% ，脚本将市价平仓并停止交易\n"
+                    await self.send_notification(msg.lstrip())
+                    await self.graceful_shutdown(msg)
                     continue
 
                 if not mismatch_detected:
